@@ -50,11 +50,6 @@ export async function POST(request) {
         email: String(invitee.email),
         timezone,
       },
-      tracking: {
-        utm_source: 'suncoast-livescan-site',
-        utm_campaign: 'helcim-paid-booking',
-        utm_content: String(service?.code || ''),
-      },
     };
 
     const normalizedPhone = normalizePhone(invitee?.phone);
@@ -105,7 +100,6 @@ export async function POST(request) {
           email: payload.invitee.email,
           timezone: payload.invitee.timezone,
         },
-        tracking: payload.tracking,
       };
       ({ response: res, responseData: data } = await postInvitee(minimalPayload));
     }

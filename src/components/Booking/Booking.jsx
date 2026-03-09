@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import './Booking.css';
 import pricing from '../../data/pricing.json';
 
@@ -24,10 +24,7 @@ const Booking = ({ service, onClose }) => {
   const [paymentComplete, setPaymentComplete] = useState(false);
   const [paymentTransactionId, setPaymentTransactionId] = useState('');
 
-  const [isSavingToCalendly, setIsSavingToCalendly] = useState(false);
-  const [bookingError, setBookingError] = useState('');
-  const [bookingResult, setBookingResult] = useState(null);
-
+  const calendlyBaseUrl = process.env.NEXT_PUBLIC_CALENDLY_URL || '';
   const envAmount = process.env.NEXT_PUBLIC_BOOKING_PRICE ? parseFloat(process.env.NEXT_PUBLIC_BOOKING_PRICE) : undefined;
   const mappedPrice = pricing?.[service.code] ?? undefined;
   const priceAmount = Number.isFinite(envAmount) ? envAmount : (Number.isFinite(mappedPrice) ? mappedPrice : 65.0);
@@ -45,11 +42,8 @@ const Booking = ({ service, onClose }) => {
       const dow = date.getDay();
 
       let openDay = false;
-      if (location === 'Tampa') {
-        openDay = dow >= 1 && dow <= 5;
-      } else if (location === 'Tarpon Springs') {
-        openDay = dow === 0 || dow === 6;
-      }
+      if (location === 'Tampa') openDay = dow >= 1 && dow <= 5;
+      if (location === 'Tarpon Springs') openDay = dow === 0 || dow === 6;
 
       if (openDay) {
         days.push({
@@ -87,15 +81,11 @@ const Booking = ({ service, onClose }) => {
       });
 
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || 'Unable to load available times');
-      }
+      if (!res.ok) throw new Error(data?.error || 'Unable to load available times');
 
       const slots = Array.isArray(data?.slots) ? data.slots : [];
       setAvailableSlots(slots);
-      if (!slots.length) {
-        setSlotError('No available times for this day. Please choose another date.');
-      }
+      if (!slots.length) setSlotError('No available times for this day. Please choose another date.');
     } catch (err) {
       setSlotError(String(err?.message || err));
     } finally {
@@ -115,6 +105,34 @@ const Booking = ({ service, onClose }) => {
     setAppointmentDetails((prev) => ({ ...prev, [name]: value }));
   };
 
+  const buildCalendlyUrl = (txnId = '') => {
+    if (!calendlyBaseUrl) return '';
+
+    try {
+      const url = new URL(calendlyBaseUrl);
+      const fullName = `${appointmentDetails.firstName} ${appointmentDetails.lastName}`.trim();
+
+      if (fullName) url.searchParams.set('name', fullName);
+      if (appointmentDetails.email) url.searchParams.set('email', appointmentDetails.email);
+
+      url.searchParams.set('a1', service.title);
+      url.searchParams.set('a2', service.code);
+      url.searchParams.set('a3', location);
+      url.searchParams.set('a4', appointmentDetails.phone || '');
+      if (selectedSlot?.startTime) url.searchParams.set('a5', selectedSlot.startTime);
+      if (txnId) url.searchParams.set('a6', txnId);
+
+      return url.toString();
+    } catch {
+      return '';
+    }
+  };
+
+  const calendlyRedirectUrl = useMemo(
+    () => buildCalendlyUrl(paymentTransactionId),
+    [paymentTransactionId, appointmentDetails.firstName, appointmentDetails.lastName, appointmentDetails.email, appointmentDetails.phone, service.title, service.code, location, selectedSlot?.startTime]
+  );
+
   const checkHelcimPayReady = () => {
     if (typeof window !== 'undefined' && typeof window.appendHelcimPayIframe === 'function') {
       return Promise.resolve(true);
@@ -122,53 +140,10 @@ const Booking = ({ service, onClose }) => {
     return Promise.reject(new Error('HelcimPay script not loaded. Please refresh the page.'));
   };
 
-  const createCalendlyBooking = async (transactionId) => {
-    if (!selectedSlot?.startTime) throw new Error('Please select a valid time slot.');
-
-    setBookingError('');
-    setIsSavingToCalendly(true);
-
-    try {
-      const res = await fetch('/api/calendly/book', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          startTime: selectedSlot.startTime,
-          timezone: userTimezone,
-          location,
-          service: {
-            code: service.code,
-            title: service.title,
-          },
-          paymentTransactionId: transactionId || paymentTransactionId || '',
-          invitee: {
-            firstName: appointmentDetails.firstName,
-            lastName: appointmentDetails.lastName,
-            email: appointmentDetails.email,
-            phone: appointmentDetails.phone,
-          },
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.error || 'Unable to save booking in Calendly.');
-      }
-
-      setBookingResult(data);
-      setCurrentStep(5);
-    } catch (err) {
-      setBookingError(String(err?.message || err));
-    } finally {
-      setIsSavingToCalendly(false);
-    }
-  };
-
   const openHelcimPay = async () => {
     if (isProcessingPayment || paymentComplete) return;
 
     setPaymentError('');
-    setBookingError('');
     setIsProcessingPayment(true);
 
     try {
@@ -197,7 +172,7 @@ const Booking = ({ service, onClose }) => {
           reject(new Error('Payment session timed out. Please try again.'));
         }, 5 * 60 * 1000);
 
-        async function handlePaymentMessage(event) {
+        function handlePaymentMessage(event) {
           if (event?.data?.eventName !== eventName) return;
 
           const status = event?.data?.eventStatus;
@@ -214,12 +189,16 @@ const Booking = ({ service, onClose }) => {
 
             setPaymentTransactionId(transactionId);
             setPaymentComplete(true);
+            setCurrentStep(5);
+
+            const redirectUrl = buildCalendlyUrl(transactionId);
+            if (redirectUrl) {
+              window.open(redirectUrl, '_blank', 'noopener,noreferrer');
+            }
 
             clearTimeout(timeoutId);
             window.removeEventListener('message', handlePaymentMessage);
             resolve(true);
-
-            await createCalendlyBooking(transactionId);
             return;
           }
 
@@ -250,7 +229,7 @@ const Booking = ({ service, onClose }) => {
   const renderStep1 = () => (
     <div className="booking-step">
       <h3>Select Location & Date</h3>
-      <p>Choose your location and date to view available times.</p>
+      <p>Choose your location and date to view available Calendly times.</p>
 
       <div className="form-group">
         <label>Location</label>
@@ -326,8 +305,8 @@ const Booking = ({ service, onClose }) => {
 
   const renderStep3 = () => (
     <div className="booking-step">
-      <h3>Appointment Details</h3>
-      <p>Please provide your contact information.</p>
+      <h3>Contact Details</h3>
+      <p>Enter your details before payment.</p>
 
       <div className="form-group">
         <label>First Name *</label>
@@ -350,23 +329,20 @@ const Booking = ({ service, onClose }) => {
       </div>
 
       <div className="appointment-summary">
-        <h4>Appointment Summary</h4>
+        <h4>Summary</h4>
         <p><strong>Service:</strong> {service.title}</p>
         <p><strong>ORI Code:</strong> {service.code}</p>
         <p><strong>Location:</strong> {location}</p>
-        <p>
-          <strong>Date:</strong>{' '}
-          {selectedDate?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-        </p>
+        <p><strong>Date:</strong> {selectedDate?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
         <p><strong>Time:</strong> {selectedSlot?.label}</p>
         <p><strong>Amount:</strong> ${priceAmount.toFixed(2)} USD</p>
       </div>
 
       <div className="form-actions">
         <button className="back-btn" onClick={() => setCurrentStep(2)}>
-          ← Back to Time Selection
+          ← Back to Time
         </button>
-        <button className="book-btn" onClick={() => setCurrentStep(4)} disabled={!canContinueDetails}>
+        <button className="book-btn" onClick={() => setCurrentStep(4)} disabled={!canContinueDetails || !calendlyBaseUrl}>
           Continue to Payment
         </button>
       </div>
@@ -376,17 +352,13 @@ const Booking = ({ service, onClose }) => {
   const renderStep4 = () => (
     <div className="booking-step">
       <h3>Payment</h3>
-      <p>Payment is required before we create your Calendly booking.</p>
+      <p>Payment must complete before we redirect to Calendly to finalize the meeting.</p>
 
       <div className="appointment-summary">
         <h4>Order</h4>
         <p><strong>Service:</strong> {service.title}</p>
-        <p><strong>ORI Code:</strong> {service.code}</p>
         <p><strong>Amount:</strong> ${priceAmount.toFixed(2)} USD</p>
-        <p><strong>Name:</strong> {appointmentDetails.firstName} {appointmentDetails.lastName}</p>
-        <p><strong>Email:</strong> {appointmentDetails.email}</p>
-        <p><strong>Phone:</strong> {appointmentDetails.phone}</p>
-        <p><strong>Selected Time:</strong> {selectedSlot?.label}</p>
+        <p><strong>Preferred Slot:</strong> {selectedSlot?.label}</p>
       </div>
 
       {paymentError && (
@@ -395,9 +367,9 @@ const Booking = ({ service, onClose }) => {
         </div>
       )}
 
-      {bookingError && (
+      {!calendlyBaseUrl && (
         <div className="appointment-summary" style={{ borderColor: '#e74c3c' }}>
-          <p style={{ color: '#e74c3c' }}>{bookingError}</p>
+          <p style={{ color: '#e74c3c' }}>Missing NEXT_PUBLIC_CALENDLY_URL</p>
         </div>
       )}
 
@@ -405,52 +377,32 @@ const Booking = ({ service, onClose }) => {
         <button className="back-btn" onClick={() => setCurrentStep(3)}>
           ← Back to Details
         </button>
-
-        {!paymentComplete ? (
-          <button className="book-btn" onClick={openHelcimPay} disabled={isProcessingPayment}>
-            {isProcessingPayment ? 'Opening Checkout…' : `Pay $${priceAmount.toFixed(2)}`}
-          </button>
-        ) : (
-          <button
-            className="book-btn"
-            onClick={() => createCalendlyBooking(paymentTransactionId)}
-            disabled={isSavingToCalendly}
-          >
-            {isSavingToCalendly ? 'Saving Booking…' : 'Save Appointment in Calendly'}
-          </button>
-        )}
+        <button className="book-btn" onClick={openHelcimPay} disabled={isProcessingPayment || !calendlyBaseUrl}>
+          {isProcessingPayment ? 'Opening Checkout…' : `Pay $${priceAmount.toFixed(2)}`}
+        </button>
       </div>
     </div>
   );
 
   const renderStep5 = () => (
     <div className="booking-step confirmation">
-      <h3>Appointment Booked!</h3>
+      <h3>Payment Successful</h3>
       <div className="confirmation-details">
-        <p>Your payment is complete and your meeting is saved in Calendly.</p>
+        <p>Continue in Calendly to finalize and save the meeting.</p>
         <div className="appointment-card">
-          <h4>{service.title}</h4>
-          <p><strong>ORI Code:</strong> {service.code}</p>
-          <p>
-            <strong>Date:</strong>{' '}
-            {selectedDate?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-          </p>
-          <p><strong>Time:</strong> {selectedSlot?.label}</p>
-          <p><strong>Client:</strong> {appointmentDetails.firstName} {appointmentDetails.lastName}</p>
+          <p><strong>Preferred Slot:</strong> {selectedSlot?.label}</p>
           {paymentTransactionId && <p><strong>Payment Txn:</strong> {paymentTransactionId}</p>}
         </div>
-
         <div className="form-actions" style={{ marginTop: '1rem' }}>
-          {bookingResult?.rescheduleUrl && (
-            <a className="book-btn" href={bookingResult.rescheduleUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-              Reschedule
-            </a>
-          )}
-          {bookingResult?.cancelUrl && (
-            <a className="book-btn" href={bookingResult.cancelUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-              Cancel Booking
-            </a>
-          )}
+          <a
+            className="book-btn"
+            href={calendlyRedirectUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
+            Open Calendly
+          </a>
           <button className="close-btn" onClick={onClose}>Close</button>
         </div>
       </div>
@@ -466,26 +418,11 @@ const Booking = ({ service, onClose }) => {
         </div>
 
         <div className="booking-progress">
-          <div className={`progress-step ${currentStep >= 1 ? 'active' : ''}`}>
-            <span>1</span>
-            <label>Date</label>
-          </div>
-          <div className={`progress-step ${currentStep >= 2 ? 'active' : ''}`}>
-            <span>2</span>
-            <label>Time</label>
-          </div>
-          <div className={`progress-step ${currentStep >= 3 ? 'active' : ''}`}>
-            <span>3</span>
-            <label>Details</label>
-          </div>
-          <div className={`progress-step ${currentStep >= 4 ? 'active' : ''}`}>
-            <span>4</span>
-            <label>Payment</label>
-          </div>
-          <div className={`progress-step ${currentStep >= 5 ? 'active' : ''}`}>
-            <span>5</span>
-            <label>Confirm</label>
-          </div>
+          <div className={`progress-step ${currentStep >= 1 ? 'active' : ''}`}><span>1</span><label>Date</label></div>
+          <div className={`progress-step ${currentStep >= 2 ? 'active' : ''}`}><span>2</span><label>Time</label></div>
+          <div className={`progress-step ${currentStep >= 3 ? 'active' : ''}`}><span>3</span><label>Details</label></div>
+          <div className={`progress-step ${currentStep >= 4 ? 'active' : ''}`}><span>4</span><label>Payment</label></div>
+          <div className={`progress-step ${currentStep >= 5 ? 'active' : ''}`}><span>5</span><label>Calendly</label></div>
         </div>
 
         <div className="booking-body">
